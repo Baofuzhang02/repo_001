@@ -150,18 +150,19 @@ function defaultSchool(id, name) {
 function defaultUser(id) {
   return {
     id,
+    phone: "",
     username: "",
     password: "",
     remark: "",
     status: "active",
     schedule: {
-      Monday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Tuesday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Wednesday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Thursday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Friday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Saturday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
-      Sunday: { enabled: false, roomid: "", seatid: "", times: "", seatPageId: "", fidEnc: "" },
+      Monday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Tuesday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Wednesday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Thursday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Friday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Saturday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
+      Sunday: { enabled: false, slots: [{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""},{roomid:"",seatid:"",times:"",seatPageId:"",fidEnc:""}] },
     },
   };
 }
@@ -329,16 +330,23 @@ async function buildTodayDispatchUsers(KV, schoolId, today) {
     const daySchedule = user.schedule[today];
     if (!daySchedule || !daySchedule.enabled) continue;
 
-    users.push({
-      username: user.username,
-      password: user.password,
-      roomid: daySchedule.roomid,
-      seatid: daySchedule.seatid.split(",").map(s => s.trim()).filter(Boolean),
-      times: daySchedule.times,
-      seatPageId: daySchedule.seatPageId || "",
-      fidEnc: daySchedule.fidEnc || "",
-      remark: user.remark || user.username,
-    });
+    // 兼容旧数据（单配置）和新数据（slots数组）
+    const rawSlots = daySchedule.slots
+      ? daySchedule.slots
+      : [{ roomid: daySchedule.roomid, seatid: daySchedule.seatid, times: daySchedule.times, seatPageId: daySchedule.seatPageId || "", fidEnc: daySchedule.fidEnc || "" }];
+    const activeSlots = rawSlots.filter(s => s.times && s.roomid);
+    for (const slot of activeSlots) {
+      users.push({
+        username: user.phone || user.username,
+        password: user.password,
+        roomid: slot.roomid,
+        seatid: (slot.seatid || "").split(",").map(s => s.trim()).filter(Boolean),
+        times: slot.times,
+        seatPageId: slot.seatPageId || "",
+        fidEnc: slot.fidEnc || "",
+        remark: user.remark || user.username || user.phone,
+      });
+    }
   }
   return users;
 }
@@ -485,6 +493,7 @@ async function handleAPI(request, env, path) {
     const body = await request.json();
     const id = body.id || generateId();
     const user = defaultUser(id);
+    user.phone = body.phone || "";
     user.username = body.username || "";
     user.password = body.password ? await aesEncrypt(body.password) : "";
     user.remark = body.remark || "";
@@ -512,6 +521,7 @@ async function handleAPI(request, env, path) {
     const user = await getUser(KV, schoolId, userId);
     if (!user) return jsonResp({ error: "User not found" }, 404);
     const body = await request.json();
+    if (body.phone !== undefined) user.phone = body.phone;
     if (body.username !== undefined) user.username = body.username;
     if (body.password && body.password !== "******") user.password = await aesEncrypt(body.password);
     if (body.remark !== undefined) user.remark = body.remark;
@@ -570,20 +580,29 @@ async function handleAPI(request, env, path) {
     if (!daySchedule || !daySchedule.enabled) {
       return jsonResp({ error: "User has no schedule for today" }, 400);
     }
-    const payload = {
-      username: user.username,
-      password: user.password,
-      roomid: daySchedule.roomid,
-      seatid: daySchedule.seatid.split(",").map(s => s.trim()).filter(Boolean),
-      times: daySchedule.times,
-      seatPageId: daySchedule.seatPageId || "",
-      fidEnc: daySchedule.fidEnc || "",
-      remark: user.remark || user.username,
-      endtime: school.endtime,
-      strategy: school.strategy,
-    };
-    const ok = await dispatchGitHub(env.GH_TOKEN, school.repo, payload);
-    return jsonResp({ ok });
+    const rawSlots = daySchedule.slots
+      ? daySchedule.slots
+      : [{ roomid: daySchedule.roomid, seatid: daySchedule.seatid, times: daySchedule.times, seatPageId: daySchedule.seatPageId || "", fidEnc: daySchedule.fidEnc || "" }];
+    const activeSlots = rawSlots.filter(s => s.times && s.roomid);
+    if (activeSlots.length === 0) return jsonResp({ error: "No active slots for today" }, 400);
+    let okCount = 0;
+    for (const slot of activeSlots) {
+      const payload = {
+        username: user.phone || user.username,
+        password: user.password,
+        roomid: slot.roomid,
+        seatid: (slot.seatid || "").split(",").map(s => s.trim()).filter(Boolean),
+        times: slot.times,
+        seatPageId: slot.seatPageId || "",
+        fidEnc: slot.fidEnc || "",
+        remark: user.remark || user.username || user.phone,
+        endtime: school.endtime,
+        strategy: school.strategy,
+      };
+      const ok = await dispatchGitHub(env.GH_TOKEN, school.repo, payload);
+      if (ok) okCount++;
+    }
+    return jsonResp({ ok: okCount > 0, dispatched: okCount, total: activeSlots.length });
   }
 
   // POST /api/encrypt
@@ -709,6 +728,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;b
 .schedule-day-header label{font-weight:500}
 .schedule-day-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .schedule-day-fields input{padding:6px;font-size:12px}
+.slot-row{border-top:1px solid #e8e8e8;padding-top:8px;margin-top:8px}
+.slot-label{font-size:11px;color:#888;margin-bottom:4px}
 .toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;z-index:2000;animation:slideIn 0.3s}
 .toast-success{background:#52c41a}
 .toast-error{background:#ff4d4f}
@@ -880,8 +901,8 @@ function renderSchoolDetail() {
           <table class="user-table">
             <thead>
               <tr>
-                <th>用户名</th>
-                <th>备注</th>
+                <th>手机号（账号）</th>
+                <th>昵称</th>
                 <th>状态</th>
                 <th>今日计划</th>
                 <th>操作</th>
@@ -891,11 +912,17 @@ function renderSchoolDetail() {
               \${users.map(u => {
                 const today = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
                 const todaySch = u.schedule[today];
-                const todayStr = todaySch && todaySch.enabled ? \`\${todaySch.roomid} / \${todaySch.seatid} / \${todaySch.times}\` : "无";
+                const todayStr = (() => {
+                  if (!todaySch || !todaySch.enabled) return "无";
+                  const slots = todaySch.slots || [{ roomid: todaySch.roomid, times: todaySch.times }];
+                  const active = slots.filter(s => s.times && s.roomid);
+                  if (active.length === 0) return "已启用/无有效时段";
+                  return active.map(s => s.times).join(" | ");
+                })();
                 return \`
                   <tr>
-                    <td>\${u.username}</td>
-                    <td>\${u.remark || "-"}</td>
+                    <td>\${u.phone || "-"}</td>
+                    <td>\${u.username || u.remark || "-"}</td>
                     <td class="status-\${u.status}">\${u.status === "active" ? "活跃" : "暂停"}</td>
                     <td style="font-size:12px">\${todayStr}</td>
                     <td class="actions">
@@ -1033,17 +1060,23 @@ function renderUserModal() {
           <input type="hidden" id="edit_user_id">
           <div class="form-row">
             <div class="form-group">
-              <label>用户名（学号/手机号）</label>
-              <input type="text" id="edit_user_username">
+              <label>手机号（登录账号）</label>
+              <input type="text" id="edit_user_phone" placeholder="超星登录手机号">
             </div>
             <div class="form-group">
               <label>密码（留空不修改）</label>
               <input type="password" id="edit_user_password">
             </div>
           </div>
-          <div class="form-group">
-            <label>备注</label>
-            <input type="text" id="edit_user_remark" placeholder="方便识别">
+          <div class="form-row">
+            <div class="form-group">
+              <label>昵称（便于识别）</label>
+              <input type="text" id="edit_user_username" placeholder="如：张三">
+            </div>
+            <div class="form-group">
+              <label>备注</label>
+              <input type="text" id="edit_user_remark" placeholder="其他备注">
+            </div>
           </div>
           <h4 style="margin:20px 0 12px">周计划配置</h4>
           <div class="schedule-grid">
@@ -1053,15 +1086,21 @@ function renderUserModal() {
                   <input type="checkbox" id="sch_\${d}_enabled">
                   <label>\${dayNames[d]}</label>
                 </div>
-                <div class="schedule-day-fields">
-                  <input type="text" id="sch_\${d}_roomid" placeholder="房间ID">
-                  <input type="text" id="sch_\${d}_seatid" placeholder="座位号(逗号分隔)">
-                  <input type="text" id="sch_\${d}_times" placeholder="时间段如09:00-22:00">
-                </div>
-                <div class="schedule-day-fields" style="margin-top:6px">
-                  <input type="text" id="sch_\${d}_seatPageId" placeholder="seatPageId">
-                  <input type="text" id="sch_\${d}_fidEnc" placeholder="fidEnc">
-                </div>
+                \${[0,1,2].map(i => \`
+                  <div class="slot-row">
+                    <div class="slot-label">时段\${i+1}</div>
+                    <div class="schedule-day-fields">
+                      <input type="text" id="sch_\${d}_s\${i}_roomid" placeholder="房间ID">
+                      <input type="text" id="sch_\${d}_s\${i}_seatid" placeholder="座位号(逗号分隔)">
+                      <input type="text" id="sch_\${d}_s\${i}_times" placeholder="09:00-22:00">
+                    </div>
+                    <div class="schedule-day-fields" style="margin-top:4px">
+                      <input type="text" id="sch_\${d}_s\${i}_seatPageId" placeholder="seatPageId">
+                      <input type="text" id="sch_\${d}_s\${i}_fidEnc" placeholder="fidEnc">
+                      <span></span>
+                    </div>
+                  </div>
+                \`).join("")}
               </div>
             \`).join("")}
           </div>
@@ -1212,17 +1251,20 @@ async function triggerSchool() {
 function showAddUser() {
   document.getElementById("userModalTitle").textContent = "添加用户";
   document.getElementById("edit_user_id").value = "";
+  document.getElementById("edit_user_phone").value = "";
   document.getElementById("edit_user_username").value = "";
   document.getElementById("edit_user_password").value = "";
   document.getElementById("edit_user_remark").value = "";
   const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
   days.forEach(d => {
     document.getElementById("sch_" + d + "_enabled").checked = false;
-    document.getElementById("sch_" + d + "_roomid").value = "";
-    document.getElementById("sch_" + d + "_seatid").value = "";
-    document.getElementById("sch_" + d + "_times").value = "";
-    document.getElementById("sch_" + d + "_seatPageId").value = "";
-    document.getElementById("sch_" + d + "_fidEnc").value = "";
+    [0,1,2].forEach(i => {
+      document.getElementById("sch_" + d + "_s" + i + "_roomid").value = "";
+      document.getElementById("sch_" + d + "_s" + i + "_seatid").value = "";
+      document.getElementById("sch_" + d + "_s" + i + "_times").value = "";
+      document.getElementById("sch_" + d + "_s" + i + "_seatPageId").value = "";
+      document.getElementById("sch_" + d + "_s" + i + "_fidEnc").value = "";
+    });
   });
   document.getElementById("userModal").classList.add("show");
 }
@@ -1233,41 +1275,51 @@ async function showEditUser(userId) {
   const u = res.user;
   document.getElementById("userModalTitle").textContent = "编辑用户";
   document.getElementById("edit_user_id").value = u.id;
-  document.getElementById("edit_user_username").value = u.username;
+  document.getElementById("edit_user_phone").value = u.phone || "";
+  document.getElementById("edit_user_username").value = u.username || "";
   document.getElementById("edit_user_password").value = "";
   document.getElementById("edit_user_remark").value = u.remark || "";
   const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
   days.forEach(d => {
     const sch = u.schedule[d] || {};
     document.getElementById("sch_" + d + "_enabled").checked = sch.enabled || false;
-    document.getElementById("sch_" + d + "_roomid").value = sch.roomid || "";
-    document.getElementById("sch_" + d + "_seatid").value = sch.seatid || "";
-    document.getElementById("sch_" + d + "_times").value = sch.times || "";
-    document.getElementById("sch_" + d + "_seatPageId").value = sch.seatPageId || "";
-    document.getElementById("sch_" + d + "_fidEnc").value = sch.fidEnc || "";
+    // 兼容旧数据（flat）和新数据（slots）
+    const slots = sch.slots || [{ roomid: sch.roomid, seatid: sch.seatid, times: sch.times, seatPageId: sch.seatPageId, fidEnc: sch.fidEnc }];
+    [0,1,2].forEach(i => {
+      const s = slots[i] || {};
+      document.getElementById("sch_" + d + "_s" + i + "_roomid").value = s.roomid || "";
+      document.getElementById("sch_" + d + "_s" + i + "_seatid").value = s.seatid || "";
+      document.getElementById("sch_" + d + "_s" + i + "_times").value = s.times || "";
+      document.getElementById("sch_" + d + "_s" + i + "_seatPageId").value = s.seatPageId || "";
+      document.getElementById("sch_" + d + "_s" + i + "_fidEnc").value = s.fidEnc || "";
+    });
   });
   document.getElementById("userModal").classList.add("show");
 }
 
 async function doSaveUser() {
   const userId = document.getElementById("edit_user_id").value;
+  const phone = document.getElementById("edit_user_phone").value.trim();
   const username = document.getElementById("edit_user_username").value.trim();
   const password = document.getElementById("edit_user_password").value;
   const remark = document.getElementById("edit_user_remark").value.trim();
-  if (!username) return toast("请填写用户名", "error");
+  if (!phone) return toast("请填写手机号（登录账号）", "error");
   const days = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
   const schedule = {};
   days.forEach(d => {
+    const slots = [0,1,2].map(i => ({
+      roomid: document.getElementById("sch_" + d + "_s" + i + "_roomid").value.trim(),
+      seatid: document.getElementById("sch_" + d + "_s" + i + "_seatid").value.trim(),
+      times: document.getElementById("sch_" + d + "_s" + i + "_times").value.trim(),
+      seatPageId: document.getElementById("sch_" + d + "_s" + i + "_seatPageId").value.trim(),
+      fidEnc: document.getElementById("sch_" + d + "_s" + i + "_fidEnc").value.trim(),
+    }));
     schedule[d] = {
       enabled: document.getElementById("sch_" + d + "_enabled").checked,
-      roomid: document.getElementById("sch_" + d + "_roomid").value.trim(),
-      seatid: document.getElementById("sch_" + d + "_seatid").value.trim(),
-      times: document.getElementById("sch_" + d + "_times").value.trim(),
-      seatPageId: document.getElementById("sch_" + d + "_seatPageId").value.trim(),
-      fidEnc: document.getElementById("sch_" + d + "_fidEnc").value.trim(),
+      slots,
     };
   });
-  const body = { username, remark, schedule };
+  const body = { phone, username, remark, schedule };
   if (password) body.password = password;
   let res;
   if (userId) {
