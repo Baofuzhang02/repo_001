@@ -861,14 +861,14 @@ async function api(method, path, body = null) {
   } catch (_e) {
     data = { ok: res.ok };
     if (!res.ok) {
-      data.error = `HTTP ${res.status}`;
+      data.error = "HTTP " + res.status;
       data.detail = raw;
     }
   }
 
   if (!data || typeof data !== "object") data = { ok: res.ok };
   if (data.status === undefined) data.status = res.status;
-  if (!res.ok && !data.error) data.error = `HTTP ${res.status}`;
+  if (!res.ok && !data.error) data.error = "HTTP " + res.status;
   return data;
 }
 
