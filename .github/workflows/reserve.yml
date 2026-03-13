@@ -10,7 +10,8 @@ on:
       test_feishu_only:
         description: "仅测试飞书通知（true=只发测试消息，不跑抢座）"
         required: false
-        default: "false"
+        type: boolean
+        default: false
 
 jobs:
   prepare-dispatch:
