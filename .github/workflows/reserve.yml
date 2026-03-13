@@ -62,15 +62,21 @@ jobs:
 
       - name: Extract key logs
         if: ${{ always() }}
+        env:
+          USER_NAME: ${{ matrix.user.remark || matrix.user.username || 'user' }}
         run: |
-          user_name='${{ matrix.user.remark || matrix.user.username || 'user' }}'
+          user_name="${USER_NAME}"
           {
             echo "### 用户关键日志 - ${user_name}"
             echo
             echo "筛选规则：登录、策略首枪、burst发射/结果、提交参数、保存失败、座位递增、结束状态"
             echo
             echo '```text'
-            grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|submit parameter|保存失败|seat-increment|Current time|reserved successfully|success list" reserve.log | tail -n 200 || true
+            if [[ -f reserve.log ]]; then
+              grep -E "Start first attempt|login successfully|\[strategic\]|\[burst\]|submit parameter|保存失败|seat-increment|Current time|reserved successfully|success list" reserve.log | tail -n 200 || true
+            else
+              echo "reserve.log not found"
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
