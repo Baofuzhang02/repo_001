@@ -213,6 +213,7 @@ def _apply_strategy_config(config):
     global SUBMIT_MODE
     global BURST_OFFSETS_MS
     global TOKEN_FETCH_DELAY_MS
+    global FAST_PROBE_START_OFFSET_MS
     global WARM_CONNECTION_LEAD_MS
     global FIRST_TOKEN_DATE_MODE
     global SEAT_API_MODE
@@ -237,6 +238,9 @@ def _apply_strategy_config(config):
     SUBMIT_MODE = strategy_cfg.get("submit_mode", "serial")
     BURST_OFFSETS_MS = strategy_cfg.get("burst_offsets_ms", [120, 420, 820])
     TOKEN_FETCH_DELAY_MS = int(strategy_cfg.get("token_fetch_delay_ms", 50))
+    FAST_PROBE_START_OFFSET_MS = int(
+        strategy_cfg.get("fast_probe_start_offset_ms", FAST_PROBE_START_OFFSET_MS)
+    )
     WARM_CONNECTION_LEAD_MS = int(
         strategy_cfg.get("warm_connection_lead_ms", WARM_CONNECTION_LEAD_MS)
     )
