@@ -96,18 +96,21 @@ def _pick_ordered_fallback_seat(
 
 
 ENDTIME = "20:00:40"  # 根据学校的预约座位时间+40ms即可
+WARM_CONNECTION_LEAD_MS = 2200  # 连接预热提前量（毫秒）
+FIRST_TOKEN_DATE_MODE = "submit_date"  # 首次取 token 的日期：today 或 submit_date
 RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 ENABLE_SLIDER = False  # 是否有滑块验证（调试阶段先关闭）
 ENABLE_TEXTCLICK = False  # 是否有选字验证码（需要图灵云打码平台）
+SEAT_API_MODE = "seat"  # 选座接口模式：auto / seatengine / seat
+
+FAST_PROBE_START_OFFSET_MS = 14  # 目标时间后多少毫秒开始轻探测
+FAST_PROBE_INTERVAL_MS = 2  # 轻探测轮询间隔（毫秒）
+FAST_PROBE_DEADLINE_MS = 1100  # 目标时间后多久强制结束轻探测并正式取 token
 
 
 MAX_ATTEMPT = 1
 SLEEPTIME = 0.05  # 每次抢座的间隔（减少到0.05秒以加快速度）
-WARM_CONNECTION_LEAD_MS = 2200  # 连接预热提前量（毫秒）
-FIRST_TOKEN_DATE_MODE = "submit_date"  # 首次取 token 的日期：today 或 submit_date
-FAST_PROBE_START_OFFSET_MS = 21  # 目标时间后多少毫秒开始轻探测
-FAST_PROBE_INTERVAL_MS = 2  # 轻探测轮询间隔（毫秒）
-FAST_PROBE_DEADLINE_MS = 1100  # 目标时间后多久强制结束轻探测并正式取 token
+
 
 
 # 是否在每一轮主循环中都重新登录。
@@ -183,6 +186,10 @@ def _load_runtime_config(config_path, dispatch_mode, action):
             "reserve": reserve_list,
             "strategy": payload.get("strategy", {}),
             "endtime": payload.get("endtime", ENDTIME),
+            "seat_api_mode": payload.get("seat_api_mode", SEAT_API_MODE),
+            "reserve_next_day": payload.get("reserve_next_day", RESERVE_NEXT_DAY),
+            "enable_slider": payload.get("enable_slider", ENABLE_SLIDER),
+            "enable_textclick": payload.get("enable_textclick", ENABLE_TEXTCLICK),
             "relogin_every_loop": False,
         }
 
@@ -193,6 +200,9 @@ def _load_runtime_config(config_path, dispatch_mode, action):
 def _apply_strategy_config(config):
     global ENDTIME
     global RELOGIN_EVERY_LOOP
+    global RESERVE_NEXT_DAY
+    global ENABLE_SLIDER
+    global ENABLE_TEXTCLICK
     global STRATEGY_LOGIN_LEAD_SECONDS
     global STRATEGY_SLIDER_LEAD_SECONDS
     global STRATEGIC_MODE
@@ -205,9 +215,18 @@ def _apply_strategy_config(config):
     global TOKEN_FETCH_DELAY_MS
     global WARM_CONNECTION_LEAD_MS
     global FIRST_TOKEN_DATE_MODE
+    global SEAT_API_MODE
 
     strategy_cfg = config.get("strategy", {})
     ENDTIME = config.get("endtime", ENDTIME)
+    RESERVE_NEXT_DAY = bool(config.get("reserve_next_day", RESERVE_NEXT_DAY))
+    ENABLE_SLIDER = bool(config.get("enable_slider", ENABLE_SLIDER))
+    ENABLE_TEXTCLICK = bool(config.get("enable_textclick", ENABLE_TEXTCLICK))
+    seat_api_mode = str(config.get("seat_api_mode", SEAT_API_MODE)).strip().lower()
+    SEAT_API_MODE = (
+        seat_api_mode if seat_api_mode in {"auto", "seatengine", "seat"} else "auto"
+    )
+    os.environ["CX_SEAT_API_MODE"] = SEAT_API_MODE
     STRATEGY_LOGIN_LEAD_SECONDS = int(strategy_cfg.get("login_lead_seconds", 20))
     STRATEGY_SLIDER_LEAD_SECONDS = int(strategy_cfg.get("slider_lead_seconds", 14))
     STRATEGIC_MODE = strategy_cfg.get("mode", "B")
@@ -284,6 +303,7 @@ def _probe_then_get_page_token(
     formal_fetch_not_before=None,
     not_open_retry_until=None,
     not_open_retry_interval: float | None = None,
+    start_log_message: str | None = None,
 ):
     """战略模式首枪取 token 前的轻量探测。"""
     probe_start_dt = target_dt + datetime.timedelta(milliseconds=FAST_PROBE_START_OFFSET_MS)
@@ -291,6 +311,9 @@ def _probe_then_get_page_token(
     if _beijing_now() < probe_start_dt:
         while _beijing_now() < probe_start_dt:
             time.sleep(0.001)
+
+    if start_log_message:
+        logging.info("%s，实际启动时间 %s", start_log_message, _beijing_now())
 
     probe_attempt = 0
     while True:
@@ -920,12 +943,6 @@ def strategic_first_attempt(
                 # 策略 C：先从 T + FAST_PROBE_START_OFFSET_MS 开始轻探测，
                 # 到 T + TOKEN_FETCH_DELAY_MS 后再正式取一次 token 并立即提交
                 fetch_dt = target_dt + datetime.timedelta(milliseconds=TOKEN_FETCH_DELAY_MS)
-                logging.info(
-                    f"[strategic] [C] 开始探测，当前时间 {_beijing_now()} "
-                    f"（从目标时刻 + {FAST_PROBE_START_OFFSET_MS}ms 开始轻探测，"
-                    f"不早于目标时刻 + {TOKEN_FETCH_DELAY_MS}ms 正式取 token），"
-                    f"目标链接：{_first_token_url}"
-                )
                 token1, value1 = _probe_then_get_page_token(
                     s,
                     _first_token_url,
@@ -934,6 +951,12 @@ def strategic_first_attempt(
                     formal_fetch_not_before=fetch_dt,
                     not_open_retry_until=not_open_retry_until,
                     not_open_retry_interval=0.005,
+                    start_log_message=(
+                        f"[strategic] [C] 开始探测"
+                        f"（从目标时刻 + {FAST_PROBE_START_OFFSET_MS}ms 开始轻探测，"
+                        f"不早于目标时刻 + {TOKEN_FETCH_DELAY_MS}ms 正式取 token），"
+                        f"目标链接：{_first_token_url}"
+                    ),
                 )
                 if not token1:
                     logging.error("[strategic] [C] Token fetch failed, skip this config")
@@ -1229,7 +1252,8 @@ def main(users, action=False):
         1 for d in users if current_dayofweek in d.get("daysofweek")
     )
 
-    # 只在 GitHub Actions 模式下执行一次“有策略”的第一次尝试
+    # 本地与 GitHub Actions 都执行一次“有策略”的第一次尝试，
+    # 这样两边都走同一套前三抢/预热/补位逻辑。
     strategic_done = False
 
     # 保存每个配置的初始座位号（优先取 seatid 第一个），用于预热失败后按 +1 递增
@@ -1262,7 +1286,7 @@ def main(users, action=False):
 
         attempt_times += 1
 
-        if not strategic_done and action:
+        if not strategic_done:
             success_list = strategic_first_attempt(
                 users, usernames, passwords, action, target_dt, success_list, sessions
             )
