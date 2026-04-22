@@ -9,6 +9,7 @@ import os
 from urllib.parse import urlparse, parse_qs, unquote
 from urllib3.exceptions import InsecureRequestWarning
 from requests.adapters import HTTPAdapter
+from .time_utils import get_beijing_date, parse_times_range, resolve_request_day
 
 # Load environment variables from .env file
 try:
@@ -57,9 +58,7 @@ def _get_tulingcloud_config():
 
 def get_date(day_offset: int = 0):
     """基于北京时间获取日期字符串，避免时区混乱。"""
-    beijing_today = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)).date()
-    offset_day = beijing_today + datetime.timedelta(days=day_offset)
-    return offset_day.strftime("%Y-%m-%d")
+    return get_beijing_date(day_offset)
 
 
 class CredentialRejectedError(RuntimeError):
@@ -137,6 +136,7 @@ class reserve:
         enable_slider=False,
         enable_textclick=False,
         reserve_next_day=False,
+        reserve_day_offset=None,
     ):
         self.login_page = (
             "https://passport2.chaoxing.com/mlogin?loginType=1&newversion=true&fid="
@@ -219,6 +219,7 @@ class reserve:
         self.enable_slider = enable_slider
         self.enable_textclick = enable_textclick
         self.reserve_next_day = reserve_next_day
+        self.reserve_day_offset = reserve_day_offset
         self._captcha_context = {}
         self._connection_trace_context = None
         self._warm_request_trace = {}
@@ -859,6 +860,26 @@ class reserve:
 
         return self._submit_captcha("slide", captcha_token, [{"x": x}])
 
+    def _resolve_slide_captcha_with_retry(self, max_attempts: int = 2):
+        """为普通 submit() 提供一层轻量重试，避免空 slide captcha 直接提交。"""
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            captcha = self._resolve_slide_captcha()
+            if captcha:
+                if attempt > 1:
+                    logging.info(
+                        f"Slider captcha token resolved on retry attempt {attempt}/{attempts}"
+                    )
+                return captcha
+            if attempt < attempts:
+                logging.warning(
+                    f"Slider captcha token is empty on attempt {attempt}/{attempts}, retry immediately"
+                )
+        logging.error(
+            f"Slider captcha token remains empty after {attempts} attempts, skip submit to avoid empty captcha"
+        )
+        return ""
+
     def _resolve_textclick_captcha(self):
         """选字验证码求解。"""
         logging.info("Start to resolve textclick captcha token")
@@ -871,12 +892,32 @@ class reserve:
         
         positions = self._recognize_textclick_positions(image_url, target_text)
         if not positions:
-            logging.warning("Failed to recognize text positions")
+            logging.debug("Textclick captcha recognition failed before submit")
             return ""
         
         logging.info(f"Successfully recognize positions: {positions}")
         
         return self._submit_captcha("textclick", captcha_token, positions)
+
+    def _resolve_textclick_captcha_with_retry(self, max_attempts: int = 2):
+        """为普通 submit() 提供一层轻量重试，避免空 textclick 直接提交。"""
+        attempts = max(1, int(max_attempts))
+        for attempt in range(1, attempts + 1):
+            captcha = self._resolve_textclick_captcha()
+            if captcha:
+                if attempt > 1:
+                    logging.info(
+                        f"Textclick captcha token resolved on retry attempt {attempt}/{attempts}"
+                    )
+                return captcha
+            if attempt < attempts:
+                logging.warning(
+                    f"Textclick captcha token is empty on attempt {attempt}/{attempts}, retry immediately"
+                )
+        logging.error(
+            f"Textclick captcha token remains empty after {attempts} attempts, skip submit to avoid empty captcha"
+        )
+        return ""
 
     @staticmethod
     def _parse_textclick_target_chars(target_text: str):
@@ -1093,7 +1134,7 @@ class reserve:
             ocr_result = ocr.recognize_textclick(img_bytes)
             
             if not ocr_result:
-                logging.warning("TulingCloud failed to recognize text")
+                logging.debug("TulingCloud failed to recognize text")
                 return None
             
             if isinstance(ocr_result, dict):
@@ -1106,27 +1147,40 @@ class reserve:
                 raw_ocr_result = None
             
             if not recognized_text:
-                logging.warning("TulingCloud returned empty text")
+                logging.debug("TulingCloud returned empty text")
                 return None
             
-            logging.info(f"TulingCloud recognized text: {recognized_text}")
-            logging.info(f"Target text to find: {target_text}")
+            logging.debug(f"TulingCloud recognized text: {recognized_text}")
+            logging.debug(f"Target text to find: {target_text}")
             if raw_ocr_result is not None:
                 logging.debug(f"TulingCloud raw_result: {raw_ocr_result}")
             
             if not coordinates:
-                logging.error(f"TulingCloud did not return coordinates")
+                logging.debug("TulingCloud did not return coordinates")
                 return None
             
             target_chars = self._parse_textclick_target_chars(target_text)
             if not target_chars:
-                logging.warning(
+                logging.debug(
                     f"Could not parse target characters from textclick prompt: {target_text!r}"
                 )
                 return None
             
-            logging.info(f"Parsed target characters: {target_chars}")
+            logging.debug(f"Parsed target characters: {target_chars}")
             
+            recognized_chars = [char for char in str(recognized_text) if char.strip()]
+            normalized_coordinates = []
+            for idx, coord in enumerate(coordinates):
+                if not isinstance(coord, dict):
+                    continue
+                normalized_coord = dict(coord)
+                if not normalized_coord.get("text") and idx < len(recognized_chars):
+                    normalized_coord["text"] = recognized_chars[idx]
+                normalized_coordinates.append(normalized_coord)
+
+            coordinates = normalized_coordinates
+            logging.debug(f"Normalized OCR coordinates: {coordinates}")
+
             result_positions = []
             used_indices = set()
             
@@ -1145,26 +1199,30 @@ class reserve:
                             "y": int(coord["y"]),
                         })
                         used_indices.add(idx)
-                        logging.info(
+                        logging.debug(
                             f"Matched target '{target_char}' with OCR item #{idx}: {coord}"
                         )
                         found = True
                         break
                 
                 if not found:
-                    logging.warning(f"Target character '{target_char}' not found in recognized text '{recognized_text}'")
-                    logging.warning(f"Discarding this captcha recognition, will retry with new captcha")
+                    logging.debug(
+                        f"Textclick target mismatch: target '{target_char}' not found "
+                        f"in recognized text '{recognized_text}'"
+                    )
                     return None
             
             if len(result_positions) == len(target_chars):
                 logging.info(f"Final positions for target {target_chars}: {result_positions}")
                 return result_positions
             else:
-                logging.error(f"Could not find all target characters. Found {len(result_positions)}/{len(target_chars)}")
+                logging.debug(
+                    f"Could not find all target characters. Found {len(result_positions)}/{len(target_chars)}"
+                )
                 return None
             
         except Exception as e:
-            logging.error(f"FateADM recognition failed: {e}")
+            logging.debug(f"Textclick OCR position matching failed: {e}")
             import traceback
             logging.debug(traceback.format_exc())
             return None
@@ -1305,7 +1363,51 @@ class reserve:
         tl = max_loc
         return tl[0]
 
-    def submit(self, times, roomid, seatid, action, endtime_hms: str | None = None, fidEnc: str | None = None, seat_page_id: str | None = None):
+    def _build_submit_payload(
+        self,
+        times,
+        roomid,
+        seatid,
+        captcha="",
+        *,
+        use_custom_day=False,
+    ):
+        normalized_times = parse_times_range(times)
+        day = resolve_request_day(
+            normalized_times,
+            self.reserve_next_day,
+            use_custom_day=use_custom_day,
+            reserve_day_offset=self.reserve_day_offset,
+        )
+        parm = {
+            "roomId": roomid,
+            "startTime": normalized_times[0],
+            "endTime": normalized_times[1],
+            "day": day,
+            "seatNum": seatid,
+            "captcha": captcha,
+            "wyToken": "",
+        }
+        logging.info(
+            "submit parameter resolved: raw_times=%s, use_custom_day=%s, resolved_day=%s, submit_param=%s",
+            times,
+            bool(use_custom_day),
+            day,
+            parm,
+        )
+        return normalized_times, day, parm
+
+    def submit(
+        self,
+        times,
+        roomid,
+        seatid,
+        action,
+        endtime_hms: str | None = None,
+        fidEnc: str | None = None,
+        seat_page_id: str | None = None,
+        use_custom_day=False,
+    ):
         """提交预约。
 
         关键点：为了模拟手动“刷新页面再提交”，这里每次尝试前都会重新访问
@@ -1320,10 +1422,13 @@ class reserve:
             fidEnc: 对应前端 URL 中的 fidEnc 参数（例如 "dac916902610d220"）
             seat_page_id: 对应前端 URL 中的 seatId 参数（例如 "3308"）
         """
-        # 计算与 get_submit 相同的预约日期，保证页面 token 与提交使用的是同一天
-        beijing_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).date()
-        delta_day = 1 if self.reserve_next_day else 0
-        day = beijing_today + datetime.timedelta(days=delta_day)
+        normalized_times = parse_times_range(times)
+        request_day = resolve_request_day(
+            normalized_times,
+            self.reserve_next_day,
+            use_custom_day=use_custom_day,
+            reserve_day_offset=self.reserve_day_offset,
+        )
         
         # 每次调用 submit 时重置 max_attempt，确保每个配置都有充足的重试机会
         original_max_attempt = self.max_attempt
@@ -1346,14 +1451,14 @@ class reserve:
                 # 使用 seatengine/select 页面获取 submit_enc，相当于手动刷新选座页
                 page_url = self.url.format(
                     roomId=roomid,
-                    day=str(day),
+                    day=request_day,
                     seatPageId=seat_page_id or "",
                     fidEnc=fidEnc or "",
                 )
                 self.set_captcha_context(
                     roomid=roomid,
                     seat_num=seat,
-                    day=str(day),
+                    day=request_day,
                     seat_page_id=seat_page_id,
                     fid_enc=fidEnc,
                 )
@@ -1376,20 +1481,35 @@ class reserve:
                 # 根据开关决定使用哪种验证码（两种验证码可以同时开启）
                 captcha = ""
                 if self.enable_slider:
-                    captcha = self.resolve_captcha("slide")
+                    captcha = self._resolve_slide_captcha_with_retry(max_attempts=3)
                     logging.info(f"Slider captcha token: {captcha}")
+                    if not captcha:
+                        logging.warning(
+                            "Skip current submit because slide captcha is still empty after retry"
+                        )
+                        time.sleep(self.sleep_time)
+                        self.max_attempt -= 1
+                        continue
                 elif self.enable_textclick:
-                    captcha = self.resolve_captcha("textclick")
+                    captcha = self._resolve_textclick_captcha_with_retry(max_attempts=2)
                     logging.info(f"Textclick captcha token: {captcha}")
+                    if not captcha:
+                        logging.warning(
+                            "Skip current submit because textclick captcha is still empty after retry"
+                        )
+                        time.sleep(self.sleep_time)
+                        self.max_attempt -= 1
+                        continue
                 suc = self.get_submit(
                     self.submit_url,
-                    times=times,
+                    times=normalized_times,
                     token=token,
                     roomid=roomid,
                     seatid=seat,
                     captcha=captcha,
                     action=action,
                     value=value,
+                    use_custom_day=use_custom_day,
                 )
                 if suc:
                     return suc
@@ -1398,26 +1518,27 @@ class reserve:
         return suc
 
     def get_submit(
-        self, url, times, token, roomid, seatid, captcha="", action=False, value=""
+        self,
+        url,
+        times,
+        token,
+        roomid,
+        seatid,
+        captcha="",
+        action=False,
+        value="",
+        use_custom_day=False,
     ):
-        # 统一以北京时间（UTC+8）的"今天"为基准，不再区分本地 / GitHub Actions，
-        # 是否预约明天仅由 self.reserve_next_day 决定。
-        beijing_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).date()
-        delta_day = 1 if self.reserve_next_day else 0
-        day = beijing_today + datetime.timedelta(days=delta_day)
         # 与前端保持一致：提交 roomId/startTime/endTime/day/seatNum/captcha/wyToken，再计算 enc
         # 按前端逻辑：wyToken 仅在开启网易风控时由 wyRiskObj.getToken() 生成；
         # 常规情况下为空字符串，这里保持一致，不再把 submit_enc 当作 wyToken 传给后端。
-        parm = {
-            "roomId": roomid,
-            "startTime": times[0],
-            "endTime": times[1],
-            "day": str(day),
-            "seatNum": seatid,
-            "captcha": captcha,
-            "wyToken": "",
-        }
-        logging.info(f"submit parameter (before enc) {parm} ")
+        normalized_times, _, parm = self._build_submit_payload(
+            times,
+            roomid,
+            seatid,
+            captcha,
+            use_custom_day=use_custom_day,
+        )
         # 使用页面上的 submit_enc（value）作为算法值生成 enc
         parm["enc"] = verify_param(parm, value)
         logging.info(f"submit enc: {parm['enc']}")
@@ -1427,7 +1548,7 @@ class reserve:
         if data is None:
             return False
         self.last_submit_result = data
-        self.submit_msg.append(times[0] + "~" + times[1] + ":  " + str(data))
+        self.submit_msg.append(normalized_times[0] + "~" + normalized_times[1] + ":  " + str(data))
         logging.info(data)
 
         # 特殊处理：服务器返回 302 错误码（"您在页面停留过久，本次操作安全验证已超时。请刷新后再提交预约(代码:302)"）
@@ -1441,30 +1562,33 @@ class reserve:
 
         return data.get("success", False)
 
-    def burst_submit_once(self, times, roomid, seatid, captcha, token, value):
+    def burst_submit_once(
+        self,
+        times,
+        roomid,
+        seatid,
+        captcha,
+        token,
+        value,
+        use_custom_day=False,
+    ):
         """单次提交，返回完整响应 dict，用于 1.8 秒高频窗口内的逻辑判断。
 
         注意：这里沿用新的 enc 生成方式，token 仅作为前端算法值 value 的来源，
         不再直接作为提交字段发送给后端。
         """
-        beijing_today = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=8)).date()
-        delta_day = 1 if self.reserve_next_day else 0
-        day = beijing_today + datetime.timedelta(days=delta_day)
-        parm = {
-            "roomId": roomid,
-            "startTime": times[0],
-            "endTime": times[1],
-            "day": str(day),
-            "seatNum": seatid,
-            "captcha": captcha,
-            "wyToken": "",
-        }
-        logging.info(f"[burst] submit parameter (before enc) {parm} ")
+        normalized_times, _, parm = self._build_submit_payload(
+            times,
+            roomid,
+            seatid,
+            captcha,
+            use_custom_day=use_custom_day,
+        )
         parm["enc"] = verify_param(parm, value)
         data = self._submit_with_fallback(parm, request_name="[burst] seat submit")
         if data is None:
             return {"success": False, "msg": "submit request failed on all API families"}
         self.last_submit_result = data
-        self.submit_msg.append(times[0] + "~" + times[1] + ":  " + str(data))
+        self.submit_msg.append(normalized_times[0] + "~" + normalized_times[1] + ":  " + str(data))
         logging.info(data)
         return data
