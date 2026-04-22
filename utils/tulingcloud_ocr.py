@@ -108,33 +108,33 @@ class TulingCloudOCR:
                     
                     if recognized_chars and coordinates:
                         recognized_text = "".join(recognized_chars)
-                        logging.info(f"TulingCloud recognized text: {recognized_text}")
-                        logging.info(f"Coordinates: {coordinates}")
+                        logging.debug(f"TulingCloud recognized text: {recognized_text}")
+                        logging.debug(f"Coordinates: {coordinates}")
                         return {
                             "text": recognized_text,
                             "coordinates": coordinates,
                             "raw_result": result,
                         }
                     else:
-                        logging.warning("TulingCloud returned empty result")
+                        logging.debug("TulingCloud returned empty result")
                         return None
                 else:
-                    logging.warning(f"Unexpected response data format: {type(response_data)}")
+                    logging.debug(f"Unexpected response data format: {type(response_data)}")
                     return None
             else:
                 msg = result.get("message") or result.get("msg", "Unknown error")
                 code = result.get("code", -1)
-                logging.warning(f"TulingCloud recognition failed (code: {code}): {msg}")
+                logging.debug(f"TulingCloud recognition failed (code: {code}): {msg}")
                 return None
                 
         except ImportError:
             logging.error("requests library not installed. Install with: pip install requests")
             return None
         except json.JSONDecodeError:
-            logging.error("Failed to parse TulingCloud API response")
+            logging.debug("Failed to parse TulingCloud API response")
             return None
         except Exception as e:
-            logging.error(f"TulingCloud recognition failed: {e}")
+            logging.debug(f"TulingCloud recognition failed: {e}")
             import traceback
             logging.debug(traceback.format_exc())
             return None
